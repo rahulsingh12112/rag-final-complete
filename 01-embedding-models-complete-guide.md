@@ -601,3 +601,318 @@ Tum code nahi likhte cosine/dot product ka — vector DB internally optimized al
 
 - **Primary Source:** [ai-infra-engineer-learning/mod-110-llm-infrastructure/03-rag-systems.md](https://github.com/ai-infra-curriculum/ai-infra-engineer-learning/tree/main/lessons/mod-110-llm-infrastructure)
 - **Additional content added:** Infra deployment YAML, Bedrock integration code, Pinecone RAG code, production pitfalls, interview preparation, trade-off analysis, networking considerations, scaling benchmarks, follow-up Q&A — none of this was in the original curriculum link.
+
+---
+
+## Layer 10: Missing Pieces (Senior Interview Must-Know)
+
+---
+
+### 10.1: HNSW vs IVF — Vector DB Internally Search Kaise Karta Hai?
+
+Jab tumhare paas 10 million vectors hain aur ek query aati hai, toh brute-force (har vector se compare karo) impossible hai — 10M × 1024 dimensions × cosine calculate karna seconds lagega per query. Production mein tum 10ms mein answer chahte ho. Yeh problem solve karte hain **ANN (Approximate Nearest Neighbor)** algorithms. "Approximate" matlab — 100% exact nearest nahi dega, but 95-99% recall ke saath 100x faster dega.
+
+Do major approaches hain:
+
+#### HNSW (Hierarchical Navigable Small World) — Graph-Based
+
+Imagine ek multi-layer graph. Top layer mein bahut kam nodes hain (coarse view), bottom layer mein sab nodes hain (fine view). Query aati hai toh:
+
+1. Top layer se start karo — coarse level pe nearest node dhundho
+2. Ek layer neeche jao — us area mein aur precise search karo
+3. Repeat until bottom layer — final nearest neighbors mil gaye
+
+```
+Layer 3 (few nodes):     A ---- B ---- C
+                              |
+Layer 2 (more nodes):    D -- E -- F -- G -- H
+                              |
+Layer 1 (all nodes):   I-J-K-L-M-N-O-P-Q-R-S-T-U-V-W-X
+
+Query → Start at top → Navigate down → Final answer at bottom
+```
+
+**Pros:**
+- Very high recall (95-99%)
+- Low latency (<10ms for millions of vectors)
+- No training needed — insert vectors directly
+
+**Cons:**
+- RAM heavy — entire graph in memory (1M vectors × 1024d × 4 bytes = ~4GB + graph overhead ~8-12GB)
+- Insert slow compared to IVF (graph restructuring)
+
+**Use when:** <50M vectors, latency critical, RAM budget available. **Qdrant, Pinecone, Weaviate sab default mein HNSW use karte hain.**
+
+#### IVF (Inverted File Index) — Cluster-Based
+
+Pehle sab vectors ko K clusters (Voronoi cells) mein divide karo using k-means. Query aati hai toh:
+
+1. Query vector ke nearest clusters identify karo (nprobe = kitne clusters check karne)
+2. Sirf un clusters ke vectors se compare karo (brute-force within cluster)
+
+```
+Cluster 1: [v1, v5, v9, v23, ...]     ← check this
+Cluster 2: [v2, v8, v12, v45, ...]     ← skip
+Cluster 3: [v3, v7, v15, v67, ...]     ← check this
+Cluster 4: [v4, v6, v19, v89, ...]     ← skip
+
+Query → Find 2 nearest clusters → Search only within those
+```
+
+**Pros:**
+- Memory efficient — vectors can stay on disk, only cluster centroids in RAM
+- Scales to billions of vectors
+- Fast bulk insert
+
+**Cons:**
+- Lower recall than HNSW (depends on nprobe — more probes = better recall but slower)
+- Requires training step (k-means clustering on initial data)
+- Edge case: query falls between cluster boundaries → misses relevant vectors
+
+**Use when:** 100M+ vectors, memory constrained, disk-based storage acceptable. **FAISS IVF variants use this.**
+
+#### Production Decision Matrix:
+
+| Factor | HNSW | IVF |
+|--------|------|-----|
+| Vectors < 50M | ✅ Best choice | Overkill |
+| Vectors > 100M | RAM expensive | ✅ Best choice |
+| Latency < 10ms | ✅ | Possible with tuning |
+| RAM budget tight | ❌ | ✅ |
+| Recall > 99% needed | ✅ | Harder (need high nprobe) |
+| Frequent inserts | Slower (graph rebuild) | ✅ Fast |
+
+#### Interview Answer:
+
+> "HNSW is a graph-based ANN algorithm that builds a multi-layer navigable graph — queries traverse from coarse to fine layers, giving high recall at low latency but requiring the full graph in RAM. IVF is cluster-based — it partitions vectors into Voronoi cells and searches only nearby clusters, making it more memory-efficient for very large collections but with a recall-latency tradeoff controlled by nprobe. Most managed vector DBs like Qdrant and Pinecone use HNSW by default because for typical RAG use cases (< 50M vectors), RAM is affordable and latency is critical."
+
+---
+
+### 10.2: MTEB Benchmark — Model Quality Kaise Compare Karte Ho?
+
+Jab koi bolta hai "BGE is SOTA" ya "this model is better than that" — wo kahaan se pata chalta hai? **MTEB (Massive Text Embedding Benchmark).**
+
+MTEB ek standardized test suite hai jo embedding models ko **multiple tasks** pe evaluate karta hai:
+
+| Task Category | Kya Test Karta Hai | Example |
+|--------------|-------------------|---------|
+| **Retrieval** | Query diya, relevant doc find karo | Search quality |
+| **STS (Semantic Textual Similarity)** | Do sentences kitne similar hain | Similarity scoring |
+| **Classification** | Text classify karo embedding ke basis pe | Sentiment detection |
+| **Clustering** | Similar texts group karo | Topic grouping |
+| **Pair Classification** | Do texts same category ke hain ya nahi | Duplicate detection |
+| **Reranking** | Retrieved results ko reorder karo | Search ranking |
+
+Har model ka MTEB score hota hai (0-100 scale, higher = better). Leaderboard: https://huggingface.co/spaces/mteb/leaderboard
+
+#### Current Top Models (2025-2026):
+
+| Model | MTEB Avg Score | Dimensions | Notes |
+|-------|---------------|-----------|-------|
+| Voyage AI (voyage-3) | ~68 | 1024 | API-based, expensive |
+| BGE-large-en-v1.5 | ~64 | 1024 | Best open-source |
+| OpenAI text-embedding-3-large | ~65 | 3072 | API-based |
+| Cohere embed-v3 | ~65 | 1024 | API-based |
+| all-mpnet-base-v2 | ~57 | 768 | Good balance |
+
+#### Important Caveat:
+
+MTEB score is **general purpose**. Tumhara specific domain (AWS docs, networking content) pe model differently perform kar sakta hai. **Always test on your own data** — MTEB score ek starting point hai, final decision nahi.
+
+#### Interview Answer:
+
+> "I compare embedding models using the MTEB leaderboard which benchmarks across retrieval, classification, clustering, and similarity tasks. But MTEB is a general benchmark — for production, I always evaluate on our domain-specific test set because a model scoring high on MTEB may underperform on specialized content like infrastructure documentation."
+
+---
+
+### 10.3: Dense vs Sparse Embeddings & Hybrid Search — Complete Picture
+
+#### Dense Embeddings (What we've been discussing):
+
+```python
+# BERT/BGE/Titan style — fixed-size, every dimension has a value
+"What is Kubernetes?" → [0.23, -0.15, 0.78, ..., 0.45]  # 1024 numbers, ALL non-zero
+```
+
+- Captures **semantic meaning** (paraphrases work)
+- Fixed size regardless of input length
+- "Container orchestration" aur "Kubernetes deployment" similar vectors denge
+
+#### Sparse Embeddings (BM25/TF-IDF style):
+
+```python
+# Traditional keyword-based — very high dimensional, MOST values are zero
+"What is Kubernetes?" → [0, 0, 0, 0.7, 0, 0, ..., 0.3, 0, 0]  # 50,000+ dimensions, 99% zeros
+#                                  ↑ "kubernetes"        ↑ "what"
+```
+
+- Captures **exact keyword match**
+- Variable importance based on term frequency
+- "Kubernetes" aur "K8s" ko similar NAHI maanegi (exact match chahiye)
+
+#### Where Dense FAILS (Critical Interview Point):
+
+```
+Query: "Infosys Q3 2024 earnings report"
+Dense search result: Generic document about Indian IT company earnings ❌
+Sparse (BM25) result: Exact Infosys Q3 2024 document ✅
+
+Query: "Error code EKS-AUTH-403"
+Dense search result: Generic EKS authentication troubleshooting ❌
+Sparse (BM25) result: Specific doc mentioning that error code ✅
+```
+
+Dense search **fails on:**
+- Proper nouns (company names, person names)
+- Error codes, IDs, serial numbers
+- Exact version numbers ("v1.28.3")
+- Acronyms the model wasn't trained on
+
+#### Hybrid Search (Best of Both Worlds):
+
+```python
+class HybridSearch:
+    def search(self, query, alpha=0.7):
+        """
+        alpha = dense weight (semantic)
+        (1-alpha) = sparse weight (keyword)
+        """
+        # Dense: meaning-based (handles paraphrases)
+        dense_results = self.vector_db.search(query_embedding, top_k=20)
+
+        # Sparse: keyword-based (handles exact terms)
+        sparse_results = self.bm25_index.search(query, top_k=20)
+
+        # Combine using Reciprocal Rank Fusion (RRF)
+        combined = self.reciprocal_rank_fusion(dense_results, sparse_results)
+
+        return combined[:top_k]
+
+    def reciprocal_rank_fusion(self, *result_lists, k=60):
+        """
+        RRF score = sum(1 / (k + rank_in_each_list))
+        Document jo dono lists mein high rank pe hai → highest combined score
+        """
+        scores = {}
+        for result_list in result_lists:
+            for rank, doc in enumerate(result_list):
+                if doc.id not in scores:
+                    scores[doc.id] = 0
+                scores[doc.id] += 1 / (k + rank + 1)
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+```
+
+#### Which Vector DBs Support Hybrid Natively:
+
+| DB | Hybrid Search Support |
+|----|----------------------|
+| **Weaviate** | ✅ Built-in (BM25 + vector) |
+| **Qdrant** | ✅ Sparse vectors support |
+| **Elasticsearch/OpenSearch** | ✅ kNN + BM25 |
+| **Pinecone** | ✅ Sparse-dense vectors |
+| **Chroma** | ❌ Dense only |
+| **FAISS** | ❌ Dense only (library, not DB) |
+
+#### Interview Answer:
+
+> "Dense embeddings capture semantic similarity but fail on rare proper nouns, exact IDs, and terms the model wasn't trained on. Sparse retrieval (BM25) handles exact keyword matching but misses paraphrases. In production RAG systems, I use hybrid search — running both dense and sparse retrieval and combining results via Reciprocal Rank Fusion. This ensures we catch both semantic matches and exact keyword hits. Weaviate and Qdrant support this natively."
+
+---
+
+### 10.4: Embedding Fine-tuning — Kab Aur Kyun?
+
+#### Problem:
+
+Out-of-the-box BGE model general English text pe trained hai. Agar tumhara domain **highly specialized** hai (legal, medical, networking jargon), toh:
+
+```
+Query: "BGP route flapping causing ECMP imbalance"
+General model thinks: "something about routes... maybe travel routes?"
+Domain model thinks: "networking issue with BGP protocol instability affecting traffic distribution"
+```
+
+General model domain-specific terminology ki nuances miss kar sakta hai — similar terms ko distant embed kar dega.
+
+#### When to Fine-tune:
+
+| Scenario | Fine-tune? | Why |
+|----------|-----------|-----|
+| General Q&A chatbot | ❌ No | Pre-trained models are sufficient |
+| Legal document search | ✅ Yes | Legal jargon, case citation patterns |
+| Medical literature search | ✅ Yes | Medical terminology, drug names |
+| Internal company docs | Maybe | Depends on domain-specificity |
+| AWS/Cloud documentation | ❌ Usually not | Well-represented in training data |
+| Networking (your domain) | ❌ Probably not | Common enough in training corpora |
+
+#### How Fine-tuning Works (Conceptually):
+
+```python
+# You provide training pairs:
+training_data = [
+    # (query, positive_document, negative_document)
+    ("BGP flapping", "BGP route oscillation causes ECMP...", "Bird flapping wings..."),
+    ("SYN flood mitigation", "TCP SYN flood DDoS protection...", "Flood damage repair..."),
+    # ... thousands of pairs
+]
+
+# Contrastive loss pushes:
+# - query ↔ positive_doc vectors CLOSER
+# - query ↔ negative_doc vectors FARTHER APART
+```
+
+Fine-tuning tools:
+- **Sentence Transformers** `model.fit()` with triplet/contrastive loss
+- **BAAI/FlagEmbedding** fine-tune toolkit
+- **OpenAI fine-tuning API** (for their embedding models)
+
+#### Cost of Fine-tuning:
+
+| Item | Estimate |
+|------|----------|
+| Training data preparation | 2-5 days (creating query-doc pairs) |
+| GPU training time | 2-8 hours on A100 |
+| Validation/testing | 1 day |
+| Re-indexing all documents | Hours to days (depends on corpus size) |
+
+#### When NOT to Fine-tune (Important):
+
+- Model already performs well on your data (test first!)
+- You have < 1000 training pairs (insufficient data)
+- Domain is well-represented in general corpora (AWS, coding, etc.)
+- You're under time pressure (fine-tuning + re-indexing = 1-2 weeks)
+
+**Alternative to fine-tuning:** Use a better chunking strategy, add metadata filtering, or use a reranker — often these give 80% of the benefit at 10% of the cost.
+
+#### Interview Answer:
+
+> "Fine-tuning an embedding model is necessary when the domain has specialized terminology that the base model hasn't seen enough during pre-training — legal, medical, or proprietary internal language. You provide contrastive training pairs (query, relevant doc, irrelevant doc) and the model learns to embed domain terms closer together. However, fine-tuning requires re-indexing the entire corpus, so I first try better chunking, metadata filters, and cross-encoder reranking before committing to fine-tuning. For most cloud/infrastructure domains, pre-trained BGE or Titan models perform well enough without fine-tuning."
+
+---
+
+## Final Completeness Check
+
+After this guide, you know:
+
+| Topic | Covered? | Depth |
+|-------|----------|-------|
+| What embedding is | ✅ | Deep |
+| How it works internally (Transformer, contrastive training) | ✅ | Deep |
+| Similarity metrics (cosine, dot product, euclidean) | ✅ | Deep |
+| Normalization | ✅ | Deep |
+| Model comparison & selection | ✅ | Complete |
+| Production code (self-hosted + managed) | ✅ | Production-grade |
+| Infra/K8s deployment | ✅ | Complete with YAML |
+| Scaling (CPU/GPU benchmarks) | ✅ | With numbers |
+| Networking (gRPC, ClusterIP, pooling) | ✅ | Your expertise |
+| Trade-offs (self-hosted vs managed, dimensions, models) | ✅ | Decision matrices |
+| Production pitfalls (5 common failures) | ✅ | Real-world |
+| ANN algorithms (HNSW vs IVF) | ✅ | Deep |
+| MTEB benchmark | ✅ | Sufficient |
+| Dense vs Sparse + Hybrid Search | ✅ | Deep with code |
+| Fine-tuning (when, why, how) | ✅ | Complete |
+| Interview answers (2-line, 5-min, 10-min) | ✅ | All levels |
+| Follow-up Q&A | ✅ | 5+ questions |
+
+**Embedding topic: DONE. Nothing more to learn for your target role.**
+
+Move to Topic 2: Chunking Strategies when ready.
