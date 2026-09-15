@@ -863,3 +863,133 @@ S3 (raw docs) → CronJob (2AM daily) → Chunk → Embedding Service → Qdrant
 - **Primary Source:** [ai-infra-engineer-learning/mod-110-llm-infrastructure/03-rag-systems.md](https://github.com/ai-infra-curriculum/ai-infra-engineer-learning/tree/main/lessons/mod-110-llm-infrastructure)
 - **Additional Sources:** LangCopilot 2026 Chunking Guide, Anthropic Contextual Retrieval Research, Jina AI Late Chunking (arXiv:2409.04701), FreeChunker Cross-Granularity (arXiv:2510.20356)
 - **Extra added:** Production pitfalls, infra deployment, incremental indexing, content-type specific strategies, table/code handling, interview Q&A, 2026 techniques, GitLab CI/CD + ArgoCD deployment — not in original curriculum
+
+
+---
+
+## Layer 12: Gap-Fill Addendum — Quality Measurement, Cost & Connections
+
+> Ye section 5 cheezein add karta hai jo interview me pooch sakte aur upar thodी scattered/missing thi: (1) chunking quality **measure kaise**, (2) chunk size ka **embedding token limit** se link, (3) chunking ka **cost/latency** trade-off, (4) **reranker** connection, (5) **chunk size decide** ka concrete framework.
+
+---
+
+### 12.1 — Chunking Quality MEASURE Kaise Karein? (sabse important)
+
+"Maine chunking ki — par sahi ki ya nahi, kaise pata?" Ye interviewer pakka poochhega. Sirf strategies jaanna kaafi nahi; measure karna aana chahiye.
+
+**Method — offline evaluation with a golden set:**
+```
+1. Golden test set banao: 50-100 queries + har query ka "expected relevant doc(s)"
+2. Ek chunking strategy se index banao
+3. Har query chalao → retrieved chunks dekho
+4. Metrics nikalo (neeche)
+5. Doosri strategy (ya chunk size) se dohrao → compare → jo behtar, wo choose
+```
+
+**Key metrics:**
+```
+Recall@K          → K results me sahi doc aaya? (%)  — sabse common
+                    "top-5 me expected doc kitni baar mila"
+Context Precision → retrieved chunk me relevant info vs noise (signal ratio)
+                    (bada chunk = zyada noise = kam precision)
+MRR (Mean Reciprocal Rank) → sahi doc kitne upar aaya (rank 1 best)
+Answer quality    → end-to-end: LLM ka final jawab sahi/grounded aaya?
+                    (LLM-as-judge ya human sample)
+```
+
+**Practical decision:**
+```
+Recall@5 → chunk size chunno (jo strategy behtar recall de)
+Context precision + answer quality → confirm karo ki chunk vague to nahi (bada chunk trap)
+```
+
+> **Interview line:** "Chunking quality main offline evaluate karta — ek golden set (queries + expected docs) pe Recall@K aur context precision measure karke. Do strategies ya chunk sizes compare karta, jo behtar Recall@5 de wo choose. End-to-end answer quality bhi LLM-as-judge se validate karta, kyunki achhा retrieval bhi galat chunk-size se vague ho sakta."
+
+---
+
+### 12.2 — Chunk Size ↔ Embedding Token Limit (direct link)
+
+Chunking aur embedding (Topic 1) directly jude hain — ye link saaf hona chahiye:
+
+```
+RULE: chunk size KABHI embedding model ki token limit se bada NAHI.
+      Warna model chup-chaap kaat deta (silent truncation) → aadha chunk embed → galat.
+
+Model limit → safe chunk size (80-90%, headroom):
+  MiniLM (256 tok)     → chunk 200-240
+  BGE-large (512 tok)  → chunk 400-480
+  Titan/BGE-M3 (8192)  → chunk 512-1024 (poora window mat use karo — precision girti)
+```
+
+**Aur ek:** token count karo, character nahi. "Kubernetes" = 1 word par 3 token. Character-based chunking se chunk model limit cross kar sakta bina pata chale. → `tiktoken`/tokenizer se count.
+
+> **Interview line:** "Chunk size hamesha embedding model ki max-token se chhota rakhta hoon — 80-90%, headroom ke saath — warna silent truncation se aadha chunk embed hota. Aur token-based counting use karta, character-based nahi, kyunki ek word kai tokens ka ho sakta."
+
+---
+
+### 12.3 — Chunking Ka Cost/Latency Trade-off (architect angle)
+
+Chunking sirf quality nahi, **cost aur speed** bhi decide karta:
+
+```
+Chhote chunks (200):
+  ✅ precise retrieval
+  ❌ zyada chunks = zyada vectors = zyada storage (RAM) + slow search + zyada embedding cost
+
+Bade chunks (1000):
+  ✅ kam vectors = sasta storage, fast search, kam embedding calls
+  ❌ vague embedding (topics mixed) = precision girti
+
+→ chunk size ek QUALITY vs COST trade-off hai, sirf quality nahi.
+```
+
+Example: 1M docs
+```
+chunk 200 → ~5M chunks → 5M vectors → zyada RAM + embedding cost
+chunk 500 → ~2M chunks → 2M vectors → kam cost, thodी precision trade
+```
+
+> **Interview line:** "Chunk size quality aur cost dono ka trade-off hai — chhote chunks precise par zyada vectors (storage + search + embedding cost badhta), bade chunks saste par vague. Main sweet spot (256-512) pe rehta aur Recall@K se validate karta ki precision acceptable hai."
+
+---
+
+### 12.4 — Chunking + Reranker (complement — Topic 4 se juda)
+
+Chunking aur reranking saath kaam karte:
+```
+Chhote precise chunks retrieve karo (fast, top-20)
+  → phir RERANKER un top-20 ko dubara gehraai se dekh ke best order lagata (top-5)
+```
+Chunking retrieval ko precise banata, reranker order ko sahi. Dono complement — ek doosre ki jagah nahi.
+
+> **Interview line:** "Chhote focused chunks retrieval precision dete, aur main uske baad cross-encoder reranker lagata jo top candidates ko re-order kare — chunking + reranking milke best relevance dete."
+
+---
+
+### 12.5 — Chunk Size Decide Ka Concrete Framework (naye project me)
+
+```
+STEP 1: Default se shuru → Recursive splitting, chunk 512, overlap 50 (10%)
+STEP 2: Golden set banao → 50 queries + expected docs
+STEP 3: Measure → Recall@5 nikalo is config pe
+STEP 4: Experiment → 256 aur 1024 bhi try karo, Recall@5 compare
+STEP 5: Content-type adjust → tables atomic, code function-wise, structured docs header-wise
+STEP 6: Pick → jo best Recall@5 (usually 256-512 jeet-ta), aur cost acceptable ho
+STEP 7: Production → metadata add karo, incremental indexing set karo
+```
+
+> **Interview line:** "Naye project me main 512/recursive se shuru karta, ek golden set pe Recall@5 measure karta, phir 256 aur 1024 experiment karke best chunta — usually 256-512 jeet-ta. Content-type ke hisaab se adjust karta (tables atomic, code function-wise), aur metadata + incremental indexing production ke liye set karta."
+
+---
+
+### 12.6 — Ek Line Summary (revision)
+
+```
+Quality measure → golden set + Recall@K + context precision + answer quality
+Token link      → chunk < model token limit (80-90%), token-count not char
+Cost trade-off  → chhote precise par mehnge (zyada vectors), bade saste par vague
+Reranker        → chunking (precise retrieve) + reranker (order sudhaar) = complement
+Decide framework→ 512 se start → Recall@5 measure → 256/1024 try → best chuno
+```
+
+**Chunking core mantra:** *Highest-leverage decision. Sweet spot 256-512, 10-20% overlap. Model token limit ke andar. Golden set se measure karo — guess nahi.*
