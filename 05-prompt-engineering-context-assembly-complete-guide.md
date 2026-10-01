@@ -1525,3 +1525,172 @@ kubectl rollout undo deployment/rag-context-service -n rag-production
 - **Primary Source:** [ai-infra-engineer-learning/mod-110-llm-infrastructure/03-rag-systems.md](https://github.com/ai-infra-curriculum/ai-infra-engineer-learning/tree/main/lessons/mod-110-llm-infrastructure)
 - **Additional Sources:** Stanford "Lost in the Middle" paper (2024), Anthropic prompt engineering guide, LangChain documentation
 - **Extra added:** ContextAssembler production class, token budget management, chunk ordering strategies, guardrails, multi-turn handling, quality gate CI stage, production deployment pipeline, external access — not in original curriculum
+
+
+# Advanced Prompt Techniques — Addendum
+
+Beyond the standard set (4-part structure, citation, CoT, JSON, synthesis,
+anti-hallucination, ordering, guardrails), these are additional techniques used
+based on the use case. Each includes what it is, an example, when to use, and
+the trade-off.
+
+---
+
+## 1. Few-Shot Prompting
+Give the model 2–3 worked examples ("this input → this output") inside the
+prompt, so it imitates the pattern instead of guessing the format.
+
+**Example:**
+```
+Classify the CTI for each issue.
+
+Example 1:
+Issue: "Athena query returns TABLE_NOT_FOUND after DDL"
+CTI: AWS / Athena-Query / Table Not Found
+
+Example 2:
+Issue: "S3 cross-account access denied by bucket policy"
+CTI: AWS / S3-Access / Bucket Policy Denied
+
+Now classify:
+Issue: "{user_issue}"
+CTI:
+```
+
+**When to use:** output format matters, or the task is nuanced and a couple of
+examples steer the model better than instructions alone.
+**Trade-off:** examples consume tokens; too many examples bloat the prompt.
+
+---
+
+## 2. Self-Consistency
+Run the same query multiple times (with some randomness), then take the
+majority answer. Reduces one-off mistakes.
+
+**Example:**
+```
+Run the CTI prompt 5 times:
+  Run 1 → Athena / Table Not Found
+  Run 2 → Athena / Table Not Found
+  Run 3 → Athena / Schema Mismatch
+  Run 4 → Athena / Table Not Found
+  Run 5 → Athena / Table Not Found
+Majority (4/5) → Athena / Table Not Found  (higher confidence)
+```
+
+**When to use:** high-stakes answers where accuracy beats cost; ambiguous cases.
+**Trade-off:** N times the cost and latency (5 runs = 5x). Usually reserved for
+critical decisions, not every query.
+
+---
+
+## 3. ReAct (Reason + Act)
+The model alternates between reasoning ("Thought") and taking an action
+("Action", e.g. calling a tool), using each tool result to decide the next
+step. This is the core loop of an agent.
+
+**Example:**
+```
+Thought: I need similar tickets for this Athena error.
+Action: retrieve_tickets("Athena TABLE_NOT_FOUND")
+Observation: 20 tickets returned.
+Thought: These are weak; let me rerank for precision.
+Action: rerank_tickets(...)
+Observation: top ticket now strongly matches.
+Thought: Enough to decide.
+Answer: CTI = Athena / Table Not Found (92%)
+```
+
+**When to use:** multi-step tasks where the model must decide which tool to call
+and when — i.e. agentic workflows.
+**Trade-off:** more model calls (each step is a round-trip) → higher latency and
+cost; needs guardrails (max steps) to avoid loops.
+
+---
+
+## 4. Prompt Chaining
+Break a complex task into stages, where one prompt's output feeds the next
+prompt's input — instead of doing everything in one giant prompt.
+
+**Example:**
+```
+Prompt 1 (extract): "Pull the key symptoms from this case text." → symptoms
+Prompt 2 (retrieve-query): "Turn these symptoms into a search query." → query
+Prompt 3 (classify): "Given these tickets, recommend the CTI." → CTI
+```
+
+**When to use:** tasks with distinct sub-steps (extract → transform → decide);
+easier to debug and tune each stage separately.
+**Trade-off:** multiple calls (cost/latency); a failure in an early stage
+propagates downstream.
+
+---
+
+## 5. Role / Persona Prompting
+Set the model's role up front so it adopts the right expertise and tone.
+
+**Example:**
+```
+"You are a senior AWS support engineer with deep knowledge of Athena, EKS, and
+networking. Recommend the CTI for the following issue..."
+```
+
+**When to use:** domain tasks where expert framing improves quality and
+vocabulary; also to control tone (formal vs casual).
+**Trade-off:** minimal; mostly upside. Over-specific personas can occasionally
+narrow the model unnecessarily.
+
+---
+
+## 6. Reflexion (Self-Critique)
+The model produces an answer, then critiques its own answer against the context,
+and revises it. A self-correction pass.
+
+**Example:**
+```
+Step 1 (draft): CTI = Athena / Schema Mismatch
+Step 2 (critique): "The user reported an explicit TABLE_NOT_FOUND error, which
+  points to the 'Table Not Found' sibling, not 'Schema Mismatch'."
+Step 3 (revise): CTI = Athena / Table Not Found
+```
+
+**When to use:** nuanced decisions where first drafts are often slightly wrong
+(e.g. sibling-CTI disambiguation).
+**Trade-off:** at least 2x the calls/tokens (draft + critique); slower.
+
+---
+
+## 7. Negative Prompting
+Explicitly state what the model must NOT do, not just what it should do.
+
+**Example:**
+```
+"Do NOT invent a CTI that is not in the retrieved tickets.
+ Do NOT paraphrase the CTI string — copy it exactly.
+ Do NOT pick an operational CTI (Region Build, Deployment) for an availability
+ inquiry."
+```
+
+**When to use:** when the model repeatedly makes a specific mistake; negative
+rules close that gap directly.
+**Trade-off:** too many "don'ts" bloat the prompt and can confuse the model;
+keep them targeted at observed failures.
+
+---
+
+## Quick reference
+
+| Technique | One-line purpose | Main cost |
+|---|---|---|
+| Few-shot | Show examples to fix format/behaviour | Tokens |
+| Self-consistency | Run N times, take majority | N× cost/latency |
+| ReAct | Reason + call tools in a loop | Multi-call latency |
+| Prompt chaining | Split task across linked prompts | Multi-call, error propagation |
+| Role/persona | Set expert framing | Minimal |
+| Reflexion | Draft → self-critique → revise | 2×+ cost |
+| Negative prompting | State explicit "don'ts" | Prompt bloat if overused |
+
+**Takeaway:** the standard set is the foundation; these are added selectively
+based on the use case. Accuracy-boosting ones (self-consistency, reflexion,
+ReAct) cost more calls, so reserve them for high-stakes or hard cases rather
+than every query.
